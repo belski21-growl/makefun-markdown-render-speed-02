@@ -600,6 +600,35 @@ function listBeginMatch(line, ci, f, mask) {
   return false;
 }
 
+// Scan one list-item line for its first non-space character (a tab counts
+// as one) and whether the line is blank (spaces/tabs only). One manual pass,
+// no regex — the list tokenizer runs this on every line of every list item,
+// so the scan stays allocation-light and reads in a single sweep.
+function scanLineIndent(line) {
+  let k = 0;
+  let blank = true;
+  while (k < line.length) {
+    const ch = line[k];
+    if (ch !== ' ' && ch !== '\t') { blank = false; break; }
+    k++;
+  }
+  return { firstNonSpace: k, blank };
+}
+
+// Decide the lazy-continuation fate of a line indented less than the item
+// indent: null ends the item here, otherwise the text to append — the line
+// itself, or indented by four spaces when it is a setext underline of the
+// previous line (so the underline stays part of the item instead of closing
+// it). Mirrors marked's lazy-continuation rules for list items.
+function lazyContinuation(line, nextLine, nextLineWithoutTabs, ci, beginFns) {
+  if ((line.includes('\t') ? line.replace(O.tabCharGlobal, '    ') : line).search(O.nonSpaceChar) >= 4) return null;
+  if (listBeginMatch(line, ci, beginFns, 39)) return null;
+  const setextContinuation = /^ {0,3}(?:=+|-+) *$/.test(nextLine) && B.lheading.test(line + '\n' + nextLine);
+  return setextContinuation
+    ? '    ' + nextLineWithoutTabs.replace(/^ {0,3}/, '')
+    : nextLine;
+}
+
 function tokList(src) {
   let cap = B.list.exec(src);
   if (cap) {
@@ -662,26 +691,15 @@ function tokList(src) {
             ? nextLine.replace(O.leadingSpaceTab, (whitespace) => expandTabs(whitespace))
             : nextLine;
           if (listBeginMatch(nextLine, ci, beginFns, 63)) break;
-          // first char that is not a space (a tab counts), and whether the
-          // line is blank (only spaces/tabs): one manual pass, no regex.
-          let k = 0;
-          let blank = true;
-          while (k < nextLineWithoutTabs.length) {
-            const ch = nextLineWithoutTabs[k];
-            if (ch !== ' ' && ch !== '\t') { blank = false; break; }
-            k++;
-          }
-          const firstNonSpace = k; // first char that is not a space (leading tabs were expanded above)
+          // Indented enough (or blank): the line belongs to this item.
+          const { firstNonSpace, blank } = scanLineIndent(nextLineWithoutTabs);
           if (firstNonSpace >= indent || blank) {
             itemContents += '\n' + nextLineWithoutTabs.slice(indent);
           } else {
+            // Under-indented: only a lazy continuation keeps the item open.
             if (blankLine) break;
-            if ((line.includes('\t') ? line.replace(O.tabCharGlobal, '    ') : line).search(O.nonSpaceChar) >= 4) break;
-            if (listBeginMatch(line, ci, beginFns, 39)) break;
-            const setextContinuation = /^ {0,3}(?:=+|-+) *$/.test(nextLine) && B.lheading.test(line + '\n' + nextLine);
-            const continuation = setextContinuation
-              ? '    ' + nextLineWithoutTabs.replace(/^ {0,3}/, '')
-              : nextLine;
+            const continuation = lazyContinuation(line, nextLine, nextLineWithoutTabs, ci, beginFns);
+            if (continuation === null) break;
             itemContents += '\n' + continuation;
           }
           blankLine = !nextLine.trim();
@@ -1046,6 +1064,21 @@ function lastCp(s) {
   return s[s.length - 1];
 }
 
+// Narrow a delimiter scan to the window that can still hold a closer: the
+// closer must lie at or after the opener (windowStart), and the search runs
+// over the masked source from the opener's end. Returns null when no closer
+// can lie in the window, otherwise the sliced window plus the last index in
+// it a closer may start at. Shared by tokEmStrong and tokDel, which differ
+// only in how they pick the closer and what they do with it.
+function closerWindow(maskedSrc, src, lLength, lastPossible) {
+  const windowStart = maskedSrc.length - src.length + lLength;
+  if (lastPossible < windowStart) return null;
+  return {
+    window: maskedSrc.slice(-src.length + lLength),
+    limit: lastPossible - windowStart,
+  };
+}
+
 function tokEmStrong(src, maskedSrc, prevChar) {
   let match = I.emStrongLDelim.exec(src);
   if (!match) return;
@@ -1068,11 +1101,10 @@ function tokEmStrong(src, maskedSrc, prevChar) {
     const openerCanClose = !!runPrevChar.trim() && (!!nextChar || (delimChar === '*' && !runPrevPunct));
     if (delimChar !== '*' && delimChar !== '_') return;
     const endReg = delimChar === '*' ? I.emStrongRDelimAst : I.emStrongRDelimUnd;
-    const lastPossibleEmStrongCloserIndex = cachedEmStrongCloser(maskedSrc, delimChar);
-    const emStrongCloserWindowStart = maskedSrc.length - src.length + lLength;
-    if (lastPossibleEmStrongCloserIndex < emStrongCloserWindowStart) return;
-    maskedSrc = maskedSrc.slice(-1 * src.length + lLength);
-    const lastPossibleEmStrongCloserIndexInWindow = lastPossibleEmStrongCloserIndex - emStrongCloserWindowStart;
+    const win = closerWindow(maskedSrc, src, lLength, cachedEmStrongCloser(maskedSrc, delimChar));
+    if (!win) return;
+    maskedSrc = win.window;
+    const lastPossibleEmStrongCloserIndexInWindow = win.limit;
     endReg.lastIndex = 0;
     while ((match = endReg.exec(maskedSrc)) !== null) {
       if (match.index > lastPossibleEmStrongCloserIndexInWindow) break;
@@ -1125,11 +1157,10 @@ function tokDel(src, maskedSrc, prevChar) {
     const lLength = cpLen(match[0]) - 1;
     let rDelim, rLength, delimTotal = lLength;
     const endReg = I.delRDelim;
-    const lastPossibleDelCloserIndex = cachedDelCloser(maskedSrc);
-    const delCloserWindowStart = maskedSrc.length - src.length + lLength;
-    if (lastPossibleDelCloserIndex < delCloserWindowStart) return;
-    maskedSrc = maskedSrc.slice(-1 * src.length + lLength);
-    const lastPossibleDelCloserIndexInWindow = lastPossibleDelCloserIndex - delCloserWindowStart;
+    const win = closerWindow(maskedSrc, src, lLength, cachedDelCloser(maskedSrc));
+    if (!win) return;
+    maskedSrc = win.window;
+    const lastPossibleDelCloserIndexInWindow = win.limit;
     endReg.lastIndex = 0;
     while ((match = endReg.exec(maskedSrc)) !== null) {
       if (match.index > lastPossibleDelCloserIndexInWindow) break;
