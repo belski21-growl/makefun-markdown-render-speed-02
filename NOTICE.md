@@ -1,11 +1,11 @@
 # NOTICE
 
-This entry is a clean-room reimplementation, written for this competition,
-of the Markdown rendering behaviour of **marked 18.1.3** (MIT), with its
-block and inline grammars reproduced from marked's own regexes so that the
+This entry reimplements, in fresh code written for this competition, the
+Markdown rendering behaviour of **marked 18.1.3** (MIT). Its block and
+inline grammars are reproduced from marked's own regexes so that the
 output is byte-identical to `marked.parse(markdown)` with marked's default
 options (gfm on, breaks off, pedantic off, async off). It is not a copy of
-marked's source; the lexer, parser and renderer were written from the
+marked's source: the lexer, parser and renderer were written from the
 algorithm, and the grammar tables were composed from the same small pieces
 marked composes them from. The competition's rules explicitly allow forking
 marked under its licence, credited.
@@ -34,3 +34,5 @@ marked's licence (MIT), as shipped in its repository:
 > THE SOFTWARE.
 
 This entry's own code is licensed under the MIT License; see LICENSE.
+
+SPDX-License-Identifier: MIT
